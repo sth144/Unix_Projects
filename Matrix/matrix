@@ -1,0 +1,542 @@
+#!/bin/bash
+
+
+#######################################################################################################
+#	Title: Matrix Operations in Bash
+#	Author: Sean Hinds
+#	Date: 01/20/18
+#	Description: This Bash script allows the user to perform various matrix operations within
+#			a *nix shell environment. To call, type ./matrix [function] [arg1]...[argn].
+#			Input files must contain tab separated integers, with no tab after the
+#			last integer in any given line, and with all rows filled completely.
+#
+#			This script uses various trap statements to prevent extraneous temporary
+#			files from remaining in the directory if execution terminates early.
+######################################################################################################
+
+
+######################################################################################################
+#	constructor() will be called before processing command line arguments to allocate temporary
+#	files used to process data. These files are defined here so that they all have the same
+#	processID in their title (ie "$$" is the same), so they may be easily removed by a
+#	corresponding destructor() function
+######################################################################################################
+
+constructor() {
+
+	# allocate input files and store filenames in variables for reference
+
+	touch _input_dims$$
+	touch _input_transpose$$
+	touch _input_mean$$
+
+	_input_dims="_input_dims$$"
+	_input_transpose="_input_transpose$$"
+	_input_mean="_input_mean$$"
+
+	# allocate temporary and output files and store filenames in variables for reference
+
+	touch tempfile$$
+	touch tempmean$$
+	touch transposed$$
+	touch meanfile$$
+	touch addfile$$
+	touch multiplied$$
+
+	tempfile="tempfile$$"
+	tempmean="tempmean$$"
+	transposed="transposed$$"
+	meanfile="meanfile$$"
+	addfile="addfile$$"
+	multiplied="multiplied$$"
+
+}
+
+
+
+######################################################################################################
+#	destructor() will be called by the trap statements defined below. This function destroys all
+#	temp files used in data processing within this script when the script terminates for any
+#	reason. The processID in the filenames should be the same as those allocated in the
+#	constructor() function. It should be the outermost processID, that of the call to the script
+#	itself
+######################################################################################################
+
+destructor() {
+
+	# remove input files from directory
+
+	rm _input_dims$$
+	rm _input_transpose$$
+	rm _input_mean$$
+
+	# remove temp and output files from directory
+
+	rm tempfile$$
+	rm tempmean$$
+	rm transposed$$
+	rm meanfile$$
+	rm addfile$$
+	rm multiplied$$
+}
+
+
+######################################################################################################
+#	These trap statements handle cases where execution terminates early, as well as the case
+#	where execution reaches the end of the script (EXIT). I did read this page before writing
+#	these statements: https://mywiki.wooledge.org/SignalTrap
+######################################################################################################
+
+trap "destructor; echo 'SIGINT received: Deleting temp files before exit'>&2; exit 1" INT
+trap "destructor; echo 'SIGHUP received: Deleting temp files before exit'>&2; exit 1" HUP
+trap "destructor; echo 'SIGTERM received: Deleting temp files before exit'>&2; exit 1" TERM
+trap "destructor; exit 1" EXIT
+
+
+######################################################################################################
+#	dims() function takes one parameter, either a filename from a command line argument, or a
+#	matrix from stdin, and prints to the console the number of  rows in that matrix, followed by
+#	a space, and then the number of columns
+######################################################################################################
+
+dims() {
+
+	# counter variables
+
+	rows=0
+	columns=0
+	columns_counted=0					# Effectively a Boolean variable
+
+	# process input:
+	# if more than one command line argument provided
+
+	if (( "$#" > 1 ))
+	then
+
+		# echo error statement to stderr
+		echo "too many args to matrix dims">&2
+		# send exit signal to terminate execution
+		exit 1
+
+	# one command line argument provided
+	elif (( "$#" == 1 ))
+	then
+
+		# First argument within this function scope is filename
+		_input_dims="$1"
+
+		# if file is not readable
+		if [ ! -r $_input_dims ]
+		then
+
+			# direct an error message to stderr and terminate execution
+			echo "cannot get dims of unreadable file">&2
+			exit 1
+
+		fi
+
+	# Input piped to stdin
+
+	elif (( "$#" == 0 ))
+	then
+
+		# use a while loop to read the file to $_input_dims
+		while
+			read
+		do
+			echo "$REPLY" >> $_input_dims
+		done
+
+	fi
+
+	# read through the input:
+
+	while
+		read
+	do
+
+		# increment rows counter and append row to $tempfile
+		rows=$(expr $rows + 1)
+		echo "$REPLY" >> $tempfile
+
+		# if the columns have not been counted (only need to count first row)
+		if (( $columns_counted == 0 ))
+		then
+			# count the words in the file (which at this point is just the first row of
+			# matrix)
+			columns=($(wc -w $tempfile))
+
+			# ensure columns will not be counted again
+			columns_counted=$(expr $columns_counted + 1)
+		fi
+
+	done < $_input_dims
+
+	# output results and reset $tempfile for potential later calls within the script
+
+	echo "$((rows)) $((columns))"
+	echo "" > $tempfile
+
+}
+
+
+
+######################################################################################################
+#	transpose() function takes an input matrix, either a filename supplied as a command line
+#	argument, or from stdin, and prints to the console the transpose of that matrix
+#	along the diagnal beginning at the leftmost entry of the first row
+######################################################################################################
+
+transpose() {
+
+	if (( "$#" > 1 ))
+	then
+
+		# echo error statement to stderr
+		echo "too many args">&2
+		# send exit signal to terminate execution
+		exit 1
+
+	# handle case where one input argument supplied
+	elif (( "$#" == 1 ))
+	then
+		_input_transpose="$1"	# First arg within this function scope is filename
+
+		# if input file is not readable
+		if [ ! -r $_input_transpose ]
+		then
+			echo "cannot transpose unreadable file">&2
+			exit 1
+		fi
+
+	# case where no argument supplied, input piped from stdin
+	elif (( "$#" == 0 ))
+	then
+		while
+			read
+		do
+			echo -e "$REPLY" >> $_input_transpose
+		done
+
+	fi
+
+	# count columns in input matrix
+	column_count=$($(echo dims $_input_transpose) | cut -f 2 -d " ")
+
+	# iterate through the matrix column by column
+	for ((index=1; index<=column_count; index++))
+	do
+
+		# cut one column at a time, translate newlines to tabs, truncate terminal tab, and append
+		# to $transposed. Then append a newline
+		cat $_input_transpose | cut -f $index | tr '\n' '\t' | head --bytes -1 >> $transposed
+		echo -e "" >> $transposed
+
+	done
+
+	# output
+	cat $transposed
+
+}
+
+
+
+######################################################################################################
+#	The mean() function takes an input matrix, either as a filename specified by a command line
+#	argument, or from stdin, and prints to the console the column-wise mean vector of that matrix
+######################################################################################################
+
+mean() {
+
+	if (( "$#" > 1 ))
+	then
+
+		# echo error statement to stderr
+		echo "too many args">&2
+		# send exit signal to terminate execution
+		exit 1
+
+	# handle case where one input argument supplied
+	elif (( "$#" == 1 ))
+	then
+		_input_mean="$1"	# First argument within this function scope is filename
+
+		# case where file is not readable
+		if [ ! -r $_input_mean ]
+		then
+			echo "cannot find mean of unreadable file">&2
+			exit 1
+		fi
+
+	# case where no input argument supplied. Input piped to stdin
+	elif (( "$#" == 0 ))
+	then
+		while
+			read
+		do
+			echo "$REPLY" >> $_input_mean
+		done
+	fi
+
+	# call dims on input matrix
+	# cut the columns of dims output to retrieve column and row counts
+	column_count=$(echo $(dims $_input_mean) | cut -f 2 -d " ")				# uses " " as delimeter
+	row_count=$(echo $(dims $_input_mean) | cut -f 1 -d " ")
+
+	# if matrix has no rows. Avoid division by 0. Flip an error
+	if (( $row_count < 1 ))
+	then
+		echo "cannot find mean vector of a matrix with 0 rows" >&2
+		exit 1
+	fi
+
+	# iterate through all columns
+	for ((index=1; index<=column_count; index++))
+	do
+
+		# convert column to a row and store in a temporary file
+		cat $_input_mean | cut -f $index | tr '\n' '\t' > $tempmean
+
+		# reset sum variable, read $tempmean contents as a string and store in line
+		sum=0
+		read -r line < $tempmean
+
+		# iterate through line to calculate sum using an expr subshell
+		for number in $line
+		do
+			sum=$(expr $sum + $number)
+		done
+
+		# calculate local mean for this column of original matrix with proper rounding
+    mean=$((        ($sum + ($row_count/2)*(($sum>0)*2-1))/$row_count       ))
+
+		# store the local mean in output file
+		echo -n -e "$(($mean))" >> $meanfile
+
+		# append tab unless processing final column
+		if (( index < column_count ))
+		then
+			echo -n -e "\t" >> $meanfile
+		fi
+
+	done
+
+	# append terminal newline
+	echo "" >> $meanfile
+
+	# output
+	cat $meanfile
+
+}
+
+
+######################################################################################################
+# 	The add() function takes two filenames from the command line as arguments, and prints to the
+# 	screen the matrix produced by adding the two matrices. Input matrices must be of the same
+# 	dimensions
+######################################################################################################
+
+add() {
+	if (( "$#" > 2 ))
+	then
+
+		# echo error statement to stderr
+		echo "too many args">&2
+		# send exit signal to terminate execution
+		exit 1
+
+	# case where no args supplied
+	elif (( "$#" < 1 ))
+	then
+		echo "no args to matrix add">&2
+		exit 1
+	fi
+
+	# case where either input file is unreadable
+	if [ ! -r $1 ] || [ ! -r $2 ]
+	then
+		echo "cannot add unreadable file">&2
+		exit 1
+	fi
+
+	# index variables
+	row_index=1
+	column_index=1
+
+	# calculate columns and rows of both files using subshells, echo, dims, and cut
+	column_count=$(echo $(dims $1) | cut -f 2 -d " ")
+	column_count_b=$(echo $(dims $2) | cut -f 2 -d " ")
+
+	row_count=$(echo $(dims $1) | cut -f 1 -d " ")
+	row_count_b=$(echo $(dims $2) | cut -f 1 -d " ")
+
+	# ensure that matrix addition is defined for these matrices
+	if (( $column_count != $column_count_b )) || (( $row_count != $row_count_b ))
+	then
+		echo "This is an error">&2
+		exit 1
+	fi
+
+	# read through input file
+	while
+		read line_a								# examine a line from matrix a
+	do
+
+		# read a line from b. head reads lines until $row_index, tail truncates previous lines
+		line_b=$(head -$row_index $2 | tail -1)
+
+		# iterate through line from a
+		for entry_a in $line_a
+		do
+			# identify corresponding entry in line b using column_index
+			entry_b=$(echo $line_b | cut -f $column_index -d " ")
+
+			# calculate the local sum using the two entries from the two matrices
+			local_sum=$(expr $entry_a + $entry_b)
+
+			# append local sum to output file
+			echo -n -e "$(($local_sum))" >> $addfile
+
+			# append tab character if not end of column
+			if (( $column_index < $column_count ))
+			then
+				echo -n -e "\t" >> $addfile
+			fi
+
+			# increment column index
+			column_index=$(expr $column_index + 1)
+		done
+
+		# terminal newline
+		echo "" >> $addfile
+
+		# reset column_index and increment row_index
+		column_index=1
+		row_index=$(expr $row_index + 1)
+
+	done < $1
+
+	# output
+	cat $addfile
+
+}
+
+
+######################################################################################################
+#	The multiply() function takes two filenames from the command line as arguments, and prints to
+#	the console the matrix resulting from multiplication of these two matrices. The matrices
+#	contained in the files specified must have dimensions which allow for matrix multiplication.
+#	That is, the number of columns in the first matrix MUST be equal to the number of rows in the
+#	second. That is because each entry in the result matrix is the dot product of a row from the
+#	first matrix and a column from the second
+######################################################################################################
+
+multiply() {
+
+	if (( "$#" > 2 ))
+	then
+
+		# echo error statement to stderr
+		echo "too many args">&2
+		# send exit signal to terminate execution
+		exit 1
+
+	# handle case where one input argument supplied
+	elif (( "$#" < 2 ))
+	then
+
+		echo "too few args">&2
+		exit 1
+
+	fi
+
+	# handle the case where either input file is not readable
+	if [ ! -r $1 ] || [ ! -r $2 ]
+	then
+		echo "cannot multiply unreadable file">&2
+		exit 1
+	fi
+
+	# calculate rows and columns of input files
+	column_count_a=$(echo $(dims $1) | cut -f 2 -d " ")
+	column_count_b=$(echo $(dims $2) | cut -f 2 -d " ")
+
+	row_count_a=$(echo $(dims $1) | cut -f 1 -d " ")
+	row_count_b=$(echo $(dims $2) | cut -f 1 -d " ")
+
+	# handle case where matrix multiplication is undefined
+	if (( $column_count_a != $row_count_b ))
+	then
+		echo "undefined matrix multiplication">&2
+		exit 1
+	fi
+
+	# read through rows of matrix a
+	while
+		read row_a
+	do
+
+		# track index of column being processed in matrix b
+		column_b_index=1
+
+		while
+
+			# iterate through all columns in b to calculate dot products against row_a
+			(( $column_b_index <= $column_count_b ))
+
+		do
+
+			# read the column
+			column_b=$(cat $2 | cut -f $column_b_index)
+
+			# reset local dot product variable
+			dot_product=0
+
+			# compute dot product of row_a and column_b at column_b_index
+
+			for (( dot_product_index=1; dot_product_index <= column_count_a; dot_product_index++ ))
+			do
+
+				# extract numbers to multiply
+				entry_from_a=$( echo $row_a | cut -f $dot_product_index -d " " )
+				entry_from_b=$( echo $column_b | cut -f $dot_product_index -d " " )
+
+				# perform multiplication
+				dot_product=$(( $dot_product + ($entry_from_a * $entry_from_b) ))
+
+			done
+
+
+
+			# append dot product to output file followed by tab (unless last in line)
+			echo -e -n "$dot_product" >> $multiplied
+
+			# append tab unless end of column
+			if (( $column_b_index < $column_count_b ))
+			then
+				echo -e -n "\t" >> $multiplied
+			fi
+
+			# increment column
+			column_b_index=$(( $column_b_index + 1 ))
+		done
+
+		# append new line character
+		echo -e "" >> $multiplied
+
+	done < $1
+
+	# output
+	cat $multiplied
+
+}
+
+
+######################################################################################################
+#	Execution of the script enters here. The constructor allocates temp files, and the line
+#	$1 "${@:2}" indicates that all command line arguments after the first should be executed
+#	in a subshell
+######################################################################################################
+
+constructor
+$1 "${@:2}"
